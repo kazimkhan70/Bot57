@@ -50,7 +50,7 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private var agentMode = false
 
-    private val panelOrder = listOf("SCANNER", "RUG CHECK", "SIZER", "EXECUTOR", "LOGGER", "EQUITY")
+    private val panelOrder = listOf("SCANNER", "RUG CHECK", "MEMORY", "SIZER", "EXECUTOR", "LOGGER", "EQUITY")
 
     private fun field(parent: LinearLayout, hint: String, value: String, number: Boolean = true, pw: Boolean = false): EditText {
         val e = EditText(this)

@@ -178,7 +178,23 @@ class Scanner(private val m: Market, private val cfg: AutoConfig, private val lo
 
 class RugCheck(private val m: Market, private val cfg: AutoConfig) {
     private var btcAt = 0L
-    private var btcFalling = false
+    private var btcRet = 0.0
+
+    /** BTC move over the last hour, refreshed every 5 minutes. */
+    fun btcHour(): Double {
+        val now = m.now()
+        if (now - btcAt > 300_000) {
+            btcAt = now
+            btcRet = try {
+                val c = m.klines("BTCUSDT", "1h", 3)
+                if (c.size >= 2) c.last().c / c[c.size - 2].c - 1 else 0.0
+            } catch (e: Exception) { 0.0 }
+        }
+        return btcRet
+    }
+
+    /** Market regime label used by memory: down, up or flat. */
+    fun regimeNow(): String = btcHour().let { if (it < -0.01) "down" else if (it > 0.01) "up" else "flat" }
 
     /** Returns null when the coin passes, otherwise the reason it was filtered. */
     fun check(sig: Signal, openSymbols: Set<String>, recent: List<Trade>, openCount: Int): String? {
@@ -196,14 +212,7 @@ class RugCheck(private val m: Market, private val cfg: AutoConfig) {
         val spread = (ask - bid) / ask * 100
         if (spread > cfg.maxSpreadPct) return "spread ${"%.2f".format(spread)}% too wide"
         if (ask / sig.price - 1 > cfg.slipCapPct / 100) return "ask already ${"%.2f".format((ask / sig.price - 1) * 100)}% above signal price"
-        if (now - btcAt > 300_000) {
-            btcAt = now
-            btcFalling = try {
-                val c = m.klines("BTCUSDT", "1h", 3)
-                c.size >= 2 && c.last().c / c[c.size - 2].c - 1 < -0.02
-            } catch (e: Exception) { false }
-        }
-        if (btcFalling) return "BTC dropping more than 2% in the last hour"
+        if (btcHour() < -0.02) return "BTC dropping more than 2% in the last hour"
         return null
     }
 }
@@ -295,7 +304,7 @@ class Learner(private val store: Store, private val logger: AgentLogger) {
         return Params(
             (p.getProperty("minSpike")?.toDoubleOrNull() ?: d.minSpike).coerceIn(Bounds.MIN_SPIKE_LO, Bounds.MIN_SPIKE_HI),
             (p.getProperty("sizePct")?.toDoubleOrNull() ?: d.sizePct).coerceIn(Bounds.SIZE_LO, Bounds.SIZE_HI),
-            (p.getProperty("tpR")?.toDoubleOrNull() ?: d.tpR).coerceIn(Bounds.TPR_LO, Bounds.TPR_HI),
+            d.tpR, // fixed: the learner no longer changes take-profit distance
             d.stopPct,
         )
     }
@@ -335,14 +344,6 @@ class Learner(private val store: Store, private val logger: AgentLogger) {
         } else if (winRate > 0.55 && avg > 0.2) {
             params.sizePct = (params.sizePct * 1.1).coerceIn(Bounds.SIZE_LO, Bounds.SIZE_HI)
             notes.add("win rate ${"%.0f".format(winRate * 100)}% and avg ${"%+.2f".format(avg)}% -> slightly larger size")
-        }
-        val tpShare = w.count { it.reason == "take-profit" }.toDouble() / w.size
-        if (tpShare < 0.15) {
-            params.tpR = (params.tpR - 0.25).coerceIn(Bounds.TPR_LO, Bounds.TPR_HI)
-            notes.add("take-profit hit only ${"%.0f".format(tpShare * 100)}% of exits -> closer target")
-        } else if (tpShare > 0.5) {
-            params.tpR = (params.tpR + 0.25).coerceIn(Bounds.TPR_LO, Bounds.TPR_HI)
-            notes.add("take-profit hit ${"%.0f".format(tpShare * 100)}% of exits -> farther target")
         }
         if (params != old) {
             save()
@@ -402,6 +403,7 @@ class AutoBot(
     private val rug = RugCheck(m, cfg)
     private val sizer = Sizer(m, cfg)
     private val exec = Executor(m, broker, store, cfg, logger)
+    private val memory = Memory(store)
 
     private var lastScan = 0L
     private var lastEquityLog = 0L
@@ -418,6 +420,8 @@ class AutoBot(
 
     private fun record(tr: Trade) {
         store.append("trades.csv", tr.toCsv())
+        memory.record(tr, tr.ts - tr.heldMin * 60_000L, store.kvGet("regimeAt:${tr.symbol}") ?: "flat")
+        logger.log("TAG", tr.symbol, LossTagger.tag(tr))
         learner.onClosed(store.trades())
     }
 
@@ -431,6 +435,7 @@ class AutoBot(
         val now = m.now()
         val p = learner.params
         val bids = HashMap<String, Double>()
+        var netErr = false
 
         // EXECUTOR: manage open positions every tick
         for (pos in exec.positions.toList()) {
@@ -438,7 +443,7 @@ class AutoBot(
                 val bid = m.book(pos.symbol).first
                 bids[pos.symbol] = bid
                 exec.exitReason(pos, bid, now, p)?.let { r -> exec.close(pos, r)?.let(::record) }
-            } catch (e: Exception) { logger.log("ERROR", pos.symbol, "price check failed: ${e.message}") }
+            } catch (e: Exception) { netErr = true; logger.log("ERROR", pos.symbol, "price check failed (exit still pending): ${e.message}") }
         }
 
         // EQUITY: curve + circuit breakers
@@ -462,6 +467,7 @@ class AutoBot(
         panel("EXECUTOR", "open ${exec.positions.size} · avg slippage ${"%.2f".format(exec.avgSlip)}% · cap ${cfg.slipCapPct}%")
         panel("SIZER", "${"%.0f".format(p.sizePct)}% of equity = ${"%.2f".format(eq * p.sizePct / 100)} USDT per trade")
         panel("RUG CHECK", "passed $passed · filtered $filtered · last: $lastFilter")
+        panel("MEMORY", memory.summary())
 
         if (halted) { panel("SCANNER", "HALTED — clear the halt in the app to resume"); return }
         if (dd >= cfg.maxDrawdownPct) { halt("drawdown ${"%.1f".format(dd)}% hit the ${cfg.maxDrawdownPct}% limit", bids); return }
@@ -471,12 +477,13 @@ class AutoBot(
         if (now - lastScan < cfg.scanEveryMs) return
         lastScan = now
         val sigs = try { scanner.scan(p.minSpike) } catch (e: Exception) { logger.log("ERROR", "-", "scan failed: ${e.message}"); return }
+        if (netErr) { logger.log("WAIT", "-", "connection problems this tick: no new entries until it recovers"); return }
         panel("SCANNER", "checked ${scanner.lastScanned} pairs · ${sigs.size} spikes ≥ ${"%.2f".format(p.minSpike)}x" +
             (sigs.maxByOrNull { it.spike }?.let { " · best ${it.symbol} ${"%.1f".format(it.spike)}x" } ?: ""))
 
         for (sig in sigs.sortedByDescending { it.spike }) {
             val open = exec.positions.map { it.symbol }.toSet()
-            val why = try { rug.check(sig, open, trades, exec.positions.size) } catch (e: Exception) { "check failed: ${e.message}" }
+            val why = try { rug.check(sig, open, trades, exec.positions.size) ?: memory.block(sig.symbol, rug.regimeNow(), m.now()) } catch (e: Exception) { "check failed: ${e.message}" }
             if (why != null) {
                 filtered++; lastFilter = "${sig.symbol} $why"
                 logger.log("FILTERED", sig.symbol, "not traded: $why")
@@ -486,6 +493,7 @@ class AutoBot(
             val exposure = exec.positions.sumOf { it.cost }
             val (quote, note) = try { sizer.size(sig.symbol, eq, broker.cash(), exposure, p) } catch (e: Exception) { 0.0 to "sizing failed: ${e.message}" }
             if (quote <= 0.0) { logger.log("FILTERED", sig.symbol, "not traded: $note"); continue }
+            store.kvSet("regimeAt:${sig.symbol}", rug.regimeNow())
             exec.open(sig, quote, p, note)
         }
     }
