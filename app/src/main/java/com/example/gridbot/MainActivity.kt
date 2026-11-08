@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -16,6 +17,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.InputType
+import android.view.Gravity
 import android.view.View
 import android.widget.*
 import java.io.File
@@ -23,10 +25,21 @@ import java.math.BigDecimal
 import java.math.MathContext
 import kotlin.concurrent.thread
 
+private val BG = 0xFF0B0F14.toInt()
+private val PANEL = 0xFF141B24.toInt()
+private val BORDER = 0xFF243041.toInt()
+private val TEXT = 0xFFE6EDF3.toInt()
+private val MUTED = 0xFF8B98A9.toInt()
+private val GREEN = 0xFF2EE59D.toInt()
+private val RED = 0xFFFF5D6C.toInt()
+private val ACCENT = 0xFF4C8DFF.toInt()
+private val PILL = 0xFF183B34.toInt()
+private val WHITE = 0xFFFFFFFF.toInt()
+
 class EquityView(c: Context) : View(c) {
     var pts: List<Double> = emptyList()
         set(v) { field = v; invalidate() }
-    private val paint = Paint().apply { color = 0xFF2E7D32.toInt(); strokeWidth = 4f; style = Paint.Style.STROKE; isAntiAlias = true }
+    private val paint = Paint().apply { color = GREEN; strokeWidth = 4f; style = Paint.Style.STROKE; isAntiAlias = true }
     override fun onDraw(cv: Canvas) {
         if (pts.size < 2) return
         val mn = pts.min(); val mx = pts.max()
@@ -42,31 +55,78 @@ class EquityView(c: Context) : View(c) {
 }
 
 class MainActivity : Activity() {
-    private lateinit var status: TextView
-    private lateinit var logView: TextView
     private lateinit var toggle: Button
-    private lateinit var panels: TextView
+    private lateinit var modePill: TextView
+    private lateinit var balanceView: TextView
+    private lateinit var stateView: TextView
+    private lateinit var logView: TextView
     private lateinit var curve: EquityView
+    private val tiles = LinkedHashMap<String, TextView>()
     private val ui = Handler(Looper.getMainLooper())
-    private var agentMode = false
 
-    private val panelOrder = listOf("SCANNER", "RUG CHECK", "MEMORY", "SIZER", "EXECUTOR", "LOGGER", "EQUITY")
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun field(parent: LinearLayout, hint: String, value: String, number: Boolean = true, pw: Boolean = false): EditText {
-        val e = EditText(this)
-        e.hint = hint; e.setText(value)
-        e.inputType = when {
-            pw -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            number -> InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-            else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-        }
-        parent.addView(e); return e
+    private fun rounded(fill: Int, radius: Int, stroke: Int? = null) = GradientDrawable().apply {
+        setColor(fill)
+        cornerRadius = dp(radius).toFloat()
+        if (stroke != null) setStroke(dp(1), stroke)
     }
 
-    private fun group(root: LinearLayout, title: String): LinearLayout {
-        val g = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        g.addView(TextView(this).apply { text = title; textSize = 14f; setPadding(0, 24, 0, 0) })
-        root.addView(g); return g
+    private fun section(root: LinearLayout, title: String): LinearLayout {
+        val c = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = rounded(PANEL, 14, BORDER)
+        }
+        root.addView(c, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        c.addView(label(title, 10f, MUTED, bold = true))
+        return c
+    }
+
+    private fun label(s: String, size: Float = 13f, color: Int = TEXT, bold: Boolean = false, mono: Boolean = false) =
+        TextView(this).apply {
+            text = s
+            textSize = size
+            setTextColor(color)
+            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+            if (mono) typeface = android.graphics.Typeface.MONOSPACE
+        }
+
+    private fun add(parent: LinearLayout, v: View, top: Int = 0) {
+        parent.addView(v, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(top) })
+    }
+
+    private fun field(parent: LinearLayout, hint: String, value: String, number: Boolean = true, pw: Boolean = false): EditText {
+        val e = EditText(this).apply {
+            this.hint = hint
+            setText(value)
+            setTextColor(TEXT)
+            setHintTextColor(MUTED)
+            background = rounded(BG, 10, BORDER)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            inputType = when {
+                pw -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                number -> InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            }
+        }
+        add(parent, e, 8)
+        return e
+    }
+
+    private fun button(text: String, color: Int = ACCENT): Button = Button(this).apply {
+        this.text = text
+        setTextColor(WHITE)
+        isAllCaps = false
+        background = rounded(color, 12)
+    }
+
+    private fun metricCard(title: String, value: View): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(14), dp(12), dp(14), dp(12))
+        background = rounded(PANEL, 14, BORDER)
+        addView(label(title, 10f, MUTED))
+        addView(value)
     }
 
     override fun onCreate(s: Bundle?) {
@@ -77,77 +137,133 @@ class MainActivity : Activity() {
         val sec = Prefs.secure(this)
         val paperStore = Store(File(filesDir, "agents_paper"))
         val liveStore = Store(File(filesDir, "agents_live"))
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 60, 40, 40) }
-        setContentView(ScrollView(this).apply { addView(root) })
 
-        root.addView(TextView(this).apply { text = "GridBot — Binance Spot"; textSize = 22f })
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(20), dp(16), dp(28))
+            setBackgroundColor(BG)
+        }
+        setContentView(ScrollView(this).apply {
+            setBackgroundColor(BG)
+            addView(root)
+        })
 
+        // ── header ──
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label("GRIDBOT", 22f, TEXT, bold = true))
+            addView(label("AUTONOMOUS TRADER · BINANCE SPOT", 10f, MUTED))
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        modePill = label("PAPER", 11f, GREEN, bold = true).apply {
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            background = rounded(PILL, 50)
+        }
+        header.addView(modePill)
+        root.addView(header)
+
+        // ── metrics ──
+        val metrics = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(metrics, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) })
+        balanceView = label("—", 18f, TEXT, bold = true)
+        stateView = label("Stopped", 16f, MUTED, bold = true)
+        metrics.addView(metricCard("BALANCE", balanceView), LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) })
+        metrics.addView(metricCard("STATE", stateView), LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(6) })
+
+        // ── six agents ──
+        val agents = section(root, "SIX AGENTS · LIVE")
+        listOf("SCANNER", "RUG CHECK", "MEMORY", "REGIME", "SIZER", "EXECUTOR", "LOGGER", "EQUITY").chunked(2).forEach { pair ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            pair.forEachIndexed { i, name ->
+                val value = label("waiting", 12f, TEXT)
+                val tile = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(10), dp(8), dp(10), dp(8))
+                    background = rounded(BG, 12, BORDER)
+                    addView(label(name, 10f, ACCENT, bold = true))
+                    addView(value)
+                }
+                tiles[name] = value
+                row.addView(tile, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                    topMargin = dp(8)
+                    if (i == 0) { rightMargin = dp(6) } else { leftMargin = dp(6) }
+                })
+            }
+            agents.addView(row)
+        }
+
+        // ── equity curve and log ──
+        val curveCard = section(root, "EQUITY CURVE")
+        curve = EquityView(this)
+        curveCard.addView(curve, LinearLayout.LayoutParams(-1, dp(140)).apply { topMargin = dp(8) })
+
+        val logCard = section(root, "LOG · every decision has a reason")
+        logView = label("", 11f, TEXT, mono = true).apply { setPadding(0, dp(8), 0, 0) }
+        logCard.addView(logView)
+
+        // ── strategy ──
+        val strategyCard = section(root, "STRATEGY")
         val strategy = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
-                listOf("Grid trading", "Trend (EMA cross + RSI)", "DCA (buy every N minutes)", "6-Agent auto bot (scans Binance)"))
+                listOf("Grid trading", "Trend (EMA cross + RSI)", "DCA (buy every N minutes)", "6-Agent auto bot (regime-aware)"))
             setSelection(when (p.getString("strategy", "agents")) { "trend" -> 1; "dca" -> 2; "grid" -> 0; else -> 3 })
         }
-        root.addView(strategy)
+        strategyCard.addView(strategy)
 
-        // ── single-coin strategies ──
-        val common = group(root, "Coin")
+        val common = section(root, "COIN & SIZE")
         val symbol = field(common, "Symbol (e.g. BTCUSDT)", p.getString("symbol", "BTCUSDT")!!, number = false)
         val interval = field(common, "Candle interval: 1m, 5m, 15m, 1h, 4h or 1d", p.getString("interval", "5m")!!, number = false)
             .apply { inputType = InputType.TYPE_CLASS_TEXT }
         val quote = field(common, "USDT per grid / per trade", p.getString("quoteS", "10")!!)
 
-        val gridG = group(root, "Grid settings")
+        val gridG = section(root, "GRID SETTINGS")
         val lower = field(gridG, "Lower price", p.getString("lowerS", "")!!)
         val upper = field(gridG, "Upper price", p.getString("upperS", "")!!)
         val levels = field(gridG, "Grid lines (min 3)", p.getInt("levels", 10).toString())
         val sl = field(gridG, "Grid stop-loss price (0 = off)", p.getString("slS", "0")!!)
-        val tight = Button(this).apply { text = "Auto tight range (±3%, 15 lines)" }
-        gridG.addView(tight)
+        val tight = button("Auto tight range (±3%, 15 lines)", BORDER)
+        add(gridG, tight, 8)
 
-        val trendG = group(root, "Trend settings (take-profit % is also used by DCA)")
+        val trendG = section(root, "TREND SETTINGS (take-profit % also used by DCA)")
         val slPct = field(trendG, "Trend stop-loss % (0 = off)", p.getString("slPctS", "1.5")!!)
         val tpPct = field(trendG, "Trend / DCA take-profit % (0 = off)", p.getString("tpPctS", "3")!!)
 
-        val dcaG = group(root, "DCA settings (0 = never sell)")
+        val dcaG = section(root, "DCA SETTINGS (0 = never sell)")
         val dcaEvery = field(dcaG, "DCA: buy every N minutes", p.getInt("dcaEvery", 60).toString())
         val dcaMax = field(dcaG, "DCA: max open cost in USDT (0 = no cap)", p.getString("dcaMaxS", "0")!!)
 
-        val limitsG = group(root, "Daily limits (realized PnL, resets 00:00 UTC; 0 = off)")
+        val limitsG = section(root, "DAILY LIMITS (realized PnL, resets 00:00 UTC; 0 = off)")
         val dayWin = field(limitsG, "Daily profit target (USDT)", p.getString("dayWinS", "0")!!)
         val dayLoss = field(limitsG, "Daily loss limit (USDT)", p.getString("dayLossS", "0")!!)
 
-        val paper = CheckBox(this).apply { text = "Paper trading (no real orders)"; isChecked = p.getBoolean("paper", true) }
-        val backtest = Button(this).apply { text = "Run backtest (last ~1000 candles)" }
-
-        // ── six-agent bot ──
-        val agentG = group(root, "6-agent bot: scanner → rug check → sizer → executor → logger → equity")
+        val agentG = section(root, "6-AGENT BOT (regime-aware: no entries in 1h downtrends)")
         val aStart = field(agentG, "Paper starting balance (USDT)", p.getString("agentStartS", "100")!!)
         val aMaxPos = field(agentG, "Max open positions", p.getInt("agentMaxPos", 3).toString())
         val aVol = field(agentG, "Min 24h volume (million USDT)", p.getString("agentVolS", "5")!!)
         val aDd = field(agentG, "Max drawdown % (closes all and halts)", p.getString("agentDdS", "10")!!)
-        val unlockText = TextView(this).apply { setPadding(0, 16, 0, 0) }
+        val unlockText = label("", 12f, MUTED).apply { setPadding(0, dp(10), 0, 0) }
         agentG.addView(unlockText)
-        val aLive = CheckBox(this).apply { text = "Trade LIVE with real money"; isChecked = p.getBoolean("agentLive", false) }
+        val aLive = CheckBox(this).apply { text = "Trade LIVE with real money"; setTextColor(TEXT); isChecked = p.getBoolean("agentLive", false) }
         agentG.addView(aLive)
-        val clearHalt = Button(this).apply { text = "Clear halt (resume after drawdown stop)" }
-        agentG.addView(clearHalt)
+        val clearHalt = button("Clear halt (resume after drawdown stop)", BORDER)
+        add(agentG, clearHalt, 8)
 
-        val accountG = group(root, "Account")
+        val accountG = section(root, "ACCOUNT")
         val key = field(accountG, "Binance API key", sec.getString("key", "")!!, number = false, pw = true)
         val secret = field(accountG, "Binance API secret", sec.getString("secret", "")!!, number = false, pw = true)
+        val paper = CheckBox(this).apply { text = "Paper trading (no real orders)"; setTextColor(TEXT); isChecked = p.getBoolean("paper", true) }
         accountG.addView(paper)
 
-        root.addView(backtest)
-        toggle = Button(this); root.addView(toggle)
-        val battery = Button(this).apply { text = "Allow background running (battery)" }
-        root.addView(battery)
-
-        panels = TextView(this).apply { textSize = 13f; typeface = android.graphics.Typeface.MONOSPACE; setPadding(0, 20, 0, 0) }
-        root.addView(panels)
-        curve = EquityView(this)
-        root.addView(curve, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 300))
-        status = TextView(this).apply { textSize = 16f; setPadding(0, 20, 0, 10) }; root.addView(status)
-        logView = TextView(this).apply { textSize = 12f; typeface = android.graphics.Typeface.MONOSPACE }; root.addView(logView)
+        // ── actions ──
+        val actions = section(root, "CONTROLS")
+        val backtest = button("Run backtest (last ~1000 candles)", ACCENT)
+        add(actions, backtest, 8)
+        toggle = button("START BOT", GREEN)
+        add(actions, toggle, 8)
+        val battery = button("Allow background running (battery)", BORDER)
+        add(actions, battery, 8)
+        val sweep = button("Compare take-profit targets (backtest)", BORDER)
+        add(actions, sweep, 8)
 
         fun isTrend() = strategy.selectedItemPosition == 1
         fun isDca() = strategy.selectedItemPosition == 2
@@ -164,13 +280,16 @@ class MainActivity : Activity() {
         }
 
         fun applyMode() {
-            agentMode = isAgents()
-            val single = !agentMode
-            vis(common, single); vis(gridG, strategy.selectedItemPosition == 0)
-            vis(trendG, isTrend() || isDca()); vis(dcaG, isDca()); vis(limitsG, single)
-            vis(paper, single); vis(backtest, single); vis(agentG, agentMode)
-            vis(panels, agentMode); vis(curve, agentMode)
-            if (agentMode) refreshUnlock()
+            val single = !isAgents()
+            vis(common, single)
+            vis(gridG, strategy.selectedItemPosition == 0)
+            vis(trendG, isTrend() || isDca())
+            vis(dcaG, isDca())
+            vis(limitsG, single)
+            vis(paper, single)
+            vis(backtest, single)
+            vis(agentG, isAgents())
+            if (isAgents()) refreshUnlock()
         }
         strategy.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(a: AdapterView<*>?, v: View?, pos: Int, id: Long) = applyMode()
@@ -205,7 +324,7 @@ class MainActivity : Activity() {
                 val n = levels.text.toString().toIntOrNull()
                 if (lo == null || up == null || n == null || lo >= up || n < 3) return "Check price range and grid lines (≥3)"
                 val spacing = (up - lo) / (n - 1) / lo * 100
-                if (spacing < 0.3) return "Grid spacing is ${"%.2f".format(spacing)}% — below 0.3% the 0.2% round-trip fees eat the profit. Use fewer lines or a wider range."
+                if (spacing < 0.3) return "Grid spacing is ${"%.2f".format(spacing)}% — below 0.3% the 0.2% round-trip fees eat the profit."
             }
             return null
         }
@@ -256,6 +375,25 @@ class MainActivity : Activity() {
             else toast("Already allowed")
         }
 
+        sweep.setOnClickListener {
+            val sym = symbolNow(); val q = quote.text.toString().toDoubleOrNull() ?: 10.0; val iv = interval.text.toString().trim()
+            val stop = slPct.text.toString().toDoubleOrNull()?.takeIf { it > 0 } ?: 1.5
+            sweep.isEnabled = false; sweep.text = "Running…"
+            thread {
+                val result = try {
+                    val cs = BinanceApi("", "").klines(sym, iv, 1000)
+                    listOf(1.0, 1.5, 2.0, 3.0).joinToString("\n\n") { tp ->
+                        "TP $tp% (stop $stop%)\n" + Backtest.run(cs, null, TrendConfig(sym, q, stop, tp, true))
+                    }
+                } catch (e: Exception) { "Comparison failed: ${e.message}" }
+                ui.post {
+                    sweep.isEnabled = true; sweep.text = "Compare take-profit targets (backtest)"
+                    AlertDialog.Builder(this).setTitle("Take-profit comparison").setMessage(result)
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+        }
+
         toggle.setOnClickListener {
             if (BotState.running) {
                 startService(Intent(this, BotService::class.java).setAction("STOP"))
@@ -299,13 +437,16 @@ class MainActivity : Activity() {
 
     private val tick = object : Runnable {
         override fun run() {
-            toggle.text = if (BotState.running) "STOP BOT" else "START BOT"
-            status.text = "Status: ${BotState.status}"
+            val running = BotState.running
+            toggle.text = if (running) "STOP BOT" else "START BOT"
+            toggle.background = rounded(if (running) RED else GREEN, 12)
+            modePill.text = if (running) "RUNNING" else "STOPPED"
+            stateView.text = if (running) "Running" else "Stopped"
+            stateView.setTextColor(if (running) GREEN else MUTED)
+            balanceView.text = BotState.equity.lastOrNull()?.let { "%.2f USDT".format(it) } ?: "—"
+            for ((name, view) in tiles) view.text = BotState.agents[name] ?: "waiting"
+            curve.pts = BotState.equity
             logView.text = synchronized(BotState.logs) { BotState.logs.take(40).joinToString("\n") }
-            if (agentMode) {
-                panels.text = panelOrder.joinToString("\n") { "${it.padEnd(10)} ${BotState.agents[it] ?: "-"}" }
-                curve.pts = BotState.equity
-            }
             ui.postDelayed(this, 1000)
         }
     }

@@ -13,7 +13,7 @@
         android:allowBackup="false"
         android:icon="@android:drawable/ic_menu_compass"
         android:label="GridBot"
-        android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
             android:name=".MainActivity"

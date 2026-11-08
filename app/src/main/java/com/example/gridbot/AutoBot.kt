@@ -244,17 +244,17 @@ class Executor(
 
     private fun persist() = store.write("positions.csv", positions.joinToString("\n") { it.toCsv() } + if (positions.isEmpty()) "" else "\n")
 
-    fun open(sig: Signal, quote: Double, p: Params, why: String): Boolean {
+    fun open(sig: Signal, quote: Double, stopPct: Double, tpPct: Double, why: String): Boolean {
         return try {
             val f = broker.buy(sig.symbol, quote)
             if (f.qty.signum() <= 0) throw RuntimeException("order returned zero quantity")
             val slip = (f.avg / sig.price - 1) * 100
             slips.add(slip)
             val pos = Pos(sig.symbol, f.avg, f.qty, f.quote, f.avg, m.now(), sig.spike, sig.price,
-                f.avg * (1 - p.stopPct / 100), f.avg * (1 + p.stopPct * p.tpR / 100), slip)
+                f.avg * (1 - stopPct / 100), f.avg * (1 + tpPct / 100), slip)
             positions.add(pos); persist()
             logger.log("ENTER", sig.symbol,
-                "size ${"%.2f".format(f.quote)} USDT | $why | spike ${"%.1f".format(sig.spike)}x, 15m +${"%.1f".format(sig.ret15)}% | " +
+                "size ${"%.2f".format(f.quote)} USDT | $why | stop ${"%.2f".format(stopPct)}% tp ${"%.2f".format(tpPct)}% | spike ${"%.1f".format(sig.spike)}x, 15m +${"%.1f".format(sig.ret15)}% | " +
                     "slip ${"%.2f".format(slip)}% | stop ${"%.6g".format(pos.stop)} tp ${"%.6g".format(pos.tp)}")
             true
         } catch (e: Exception) { logger.log("ERROR", sig.symbol, "buy failed: ${e.message}"); false }
@@ -265,8 +265,9 @@ class Executor(
         if (bid > pos.peak) { pos.peak = bid; persist() }
         if (bid <= pos.stop) return "stop-loss"
         if (bid >= pos.tp) return "take-profit"
-        val trailStart = pos.entry * (1 + p.stopPct / 100)
-        if (pos.peak >= trailStart && bid <= pos.peak * (1 - p.stopPct * 0.7 / 100)) return "trailing stop"
+        val stopPct = (pos.entry - pos.stop) / pos.entry * 100
+        val trailStart = pos.entry * (1 + stopPct / 100)
+        if (pos.peak >= trailStart && bid <= pos.peak * (1 - stopPct * 0.7 / 100)) return "trailing stop"
         if ((now - pos.openedMs) / 60_000 >= cfg.maxHoldMin) return "time stop ${cfg.maxHoldMin}min"
         return null
     }
@@ -410,6 +411,7 @@ class AutoBot(
     private var filtered = 0
     private var passed = 0
     private var lastFilter = "-"
+    private var lastRegime = "-"
     val curve = ArrayList<Double>().also { l -> store.lines("equity.csv").takeLast(300).mapNotNullTo(l) { it.split(",").getOrNull(1)?.toDoubleOrNull() } }
     val halted get() = store.kvGet("halted") == "1"
 
@@ -468,6 +470,7 @@ class AutoBot(
         panel("SIZER", "${"%.0f".format(p.sizePct)}% of equity = ${"%.2f".format(eq * p.sizePct / 100)} USDT per trade")
         panel("RUG CHECK", "passed $passed · filtered $filtered · last: $lastFilter")
         panel("MEMORY", memory.summary())
+        panel("REGIME", lastRegime)
 
         if (halted) { panel("SCANNER", "HALTED — clear the halt in the app to resume"); return }
         if (dd >= cfg.maxDrawdownPct) { halt("drawdown ${"%.1f".format(dd)}% hit the ${cfg.maxDrawdownPct}% limit", bids); return }
@@ -490,11 +493,31 @@ class AutoBot(
                 continue
             }
             passed++
+            val reg = try { Regimes.of(m.klines(sig.symbol, "1h", 80)) } catch (e: Exception) { Regime.UNKNOWN }
+            lastRegime = "${sig.symbol} ${reg.name}"
+            if (reg == Regime.DOWN) {
+                filtered++; lastFilter = "${sig.symbol} 1h downtrend"
+                logger.log("FILTERED", sig.symbol, "not traded: 1h downtrend, no new long entries")
+                continue
+            }
+            if (reg == Regime.RANGE && sig.spike < p.minSpike * 1.5) {
+                filtered++; lastFilter = "${sig.symbol} weak range spike"
+                logger.log("FILTERED", sig.symbol, "not traded: sideways market needs a spike of ${"%.2f".format(p.minSpike * 1.5)}x or more")
+                continue
+            }
             val exposure = exec.positions.sumOf { it.cost }
-            val (quote, note) = try { sizer.size(sig.symbol, eq, broker.cash(), exposure, p) } catch (e: Exception) { 0.0 to "sizing failed: ${e.message}" }
-            if (quote <= 0.0) { logger.log("FILTERED", sig.symbol, "not traded: $note"); continue }
+            val (base, note) = try { sizer.size(sig.symbol, eq, broker.cash(), exposure, p) } catch (e: Exception) { 0.0 to "sizing failed: ${e.message}" }
+            val quote = if (reg == Regime.VOLATILE) base * 0.5 else base
+            if (quote <= 0.0 || quote < m.rules(sig.symbol).minNotional) {
+                logger.log("FILTERED", sig.symbol, "not traded: size ${"%.2f".format(quote)} USDT too small ($note)")
+                continue
+            }
             store.kvSet("regimeAt:${sig.symbol}", rug.regimeNow())
-            exec.open(sig, quote, p, note)
+            // Dynamic per coin: stop is about one hour of normal movement, target is a multiple of the stop.
+            val atr = try { Regimes.atrPct(m.klines(sig.symbol, "1h", 30)) } catch (e: Exception) { 2.0 }
+            val stopPct = (atr * 1.0).coerceIn(0.8, 3.0)
+            val tpPct = (stopPct * p.tpR).coerceIn(1.0, 6.0)
+            exec.open(sig, quote, stopPct, tpPct, "$note | regime ${reg.name} | 1h volatility ${"%.2f".format(atr)}%")
         }
     }
 }
