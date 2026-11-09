@@ -44,9 +44,12 @@ object Backtest {
         val total = strat.realizedPnl + unreal
         val days = (candles.last().t - candles.first().t) / DAY_MS
         val tradeCount = msgs.count { it.startsWith("BUY") || it.startsWith("SELL") }
+        val exits = msgs.filter { it.startsWith("SELL") }
+            .groupingBy { it.substringAfter("(", "other").substringBefore(")") }.eachCount()
         return buildString {
             appendLine("$name — ${"%.1f".format(days)} days, ${candles.size} candles")
             appendLine("Trades: $tradeCount")
+            appendLine("Exits: ${if (exits.isEmpty()) "none" else exits.entries.joinToString(", ") { "${it.key} ${it.value}" }}")
             appendLine("Realized PnL: ${"%.2f".format(strat.realizedPnl)} USDT")
             appendLine("Open positions: ${strat.openLots()} (unrealized ${"%.2f".format(unreal)})")
             appendLine("Total: ${"%.2f".format(total)} USDT = ${"%.2f".format(total / capital * 100)}% of ${"%.0f".format(capital)} USDT capital")

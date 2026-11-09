@@ -57,6 +57,7 @@ data class AutoConfig(
     val maxHoldMin: Int = 90,
     val scanEveryMs: Long = 60_000L,
     val fee: Double = 0.001,
+    val entryStyle: String = "momentum",   // "momentum" (buy rising coins) or "dip" (buy oversold pullbacks)
 )
 
 data class Signal(
@@ -433,6 +434,24 @@ class AutoBot(
         for (p in exec.positions.toList()) exec.close(p, "halt")?.let(::record)
     }
 
+    /** Dip-buy candidates: liquid coins whose hourly candles show an oversold pullback. */
+    private fun dipScan(): List<Signal> {
+        val tradable = m.tradable()
+        val top = m.tickers()
+            .filter { it.symbol in tradable && it.quoteVol >= cfg.minVolUsd &&
+                !it.symbol.endsWith("UPUSDT") && !it.symbol.endsWith("DOWNUSDT") }
+            .sortedByDescending { it.quoteVol }
+            .take(15)
+        val out = ArrayList<Signal>()
+        for (t in top) {
+            val cs = try { m.klines(t.symbol, "1h", 120) } catch (e: Exception) { continue }
+            if (!Signals.dipBuy(cs)) continue
+            val ret1h = cs.last().c / cs[cs.size - 2].c - 1
+            out.add(Signal(t.symbol, t.last, 0.0, 0.0, ret1h * 100, t.quoteVol, null))
+        }
+        return out
+    }
+
     fun tick() {
         val now = m.now()
         val p = learner.params
@@ -479,7 +498,7 @@ class AutoBot(
         // SCANNER -> RUG CHECK -> SIZER -> EXECUTOR
         if (now - lastScan < cfg.scanEveryMs) return
         lastScan = now
-        val sigs = try { scanner.scan(p.minSpike) } catch (e: Exception) { logger.log("ERROR", "-", "scan failed: ${e.message}"); return }
+        val sigs = try { if (cfg.entryStyle == "dip") dipScan() else scanner.scan(p.minSpike) } catch (e: Exception) { logger.log("ERROR", "-", "scan failed: ${e.message}"); return }
         if (netErr) { logger.log("WAIT", "-", "connection problems this tick: no new entries until it recovers"); return }
         panel("SCANNER", "checked ${scanner.lastScanned} pairs · ${sigs.size} spikes ≥ ${"%.2f".format(p.minSpike)}x" +
             (sigs.maxByOrNull { it.spike }?.let { " · best ${it.symbol} ${"%.1f".format(it.spike)}x" } ?: ""))
@@ -500,7 +519,7 @@ class AutoBot(
                 logger.log("FILTERED", sig.symbol, "not traded: 1h downtrend, no new long entries")
                 continue
             }
-            if (reg == Regime.RANGE && sig.spike < p.minSpike * 1.5) {
+            if (cfg.entryStyle == "momentum" && reg == Regime.RANGE && sig.spike < p.minSpike * 1.5) {
                 filtered++; lastFilter = "${sig.symbol} weak range spike"
                 logger.log("FILTERED", sig.symbol, "not traded: sideways market needs a spike of ${"%.2f".format(p.minSpike * 1.5)}x or more")
                 continue

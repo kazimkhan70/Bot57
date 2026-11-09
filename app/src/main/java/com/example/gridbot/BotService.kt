@@ -195,6 +195,7 @@ class BotService : Service() {
             maxPositions = p.getInt("agentMaxPos", 3),
             minVolUsd = (p.getString("agentVolS", "5")!!.toDoubleOrNull() ?: 5.0) * 1_000_000,
             maxDrawdownPct = p.getString("agentDdS", "10")!!.toDoubleOrNull() ?: 10.0,
+            entryStyle = p.getString("entryStyle", "momentum")!!,
         )
         val broker: Broker = if (live) LiveBroker(api) else PaperBroker(market, store, cfg.startBalance)
         val bot = AutoBot(market, broker, store, cfg, BotState::add) { k, v -> BotState.agents[k] = v }

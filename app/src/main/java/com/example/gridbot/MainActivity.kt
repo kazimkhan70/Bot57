@@ -241,6 +241,12 @@ class MainActivity : Activity() {
         val aMaxPos = field(agentG, "Max open positions", p.getInt("agentMaxPos", 3).toString())
         val aVol = field(agentG, "Min 24h volume (million USDT)", p.getString("agentVolS", "5")!!)
         val aDd = field(agentG, "Max drawdown % (closes all and halts)", p.getString("agentDdS", "10")!!)
+        val styleSpin = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("Momentum (buy rising coins)", "Dip-buy (RSI + Bollinger, buy pullbacks)"))
+            setSelection(if (p.getString("entryStyle", "momentum") == "dip") 1 else 0)
+        }
+        agentG.addView(styleSpin)
         val unlockText = label("", 12f, MUTED).apply { setPadding(0, dp(10), 0, 0) }
         agentG.addView(unlockText)
         val aLive = CheckBox(this).apply { text = "Trade LIVE with real money"; setTextColor(TEXT); isChecked = p.getBoolean("agentLive", false) }
@@ -264,6 +270,8 @@ class MainActivity : Activity() {
         add(actions, battery, 8)
         val sweep = button("Compare take-profit targets (backtest)", BORDER)
         add(actions, sweep, 8)
+        val replayBtn = button("Replay: momentum vs dip-buy (real history)", BORDER)
+        add(actions, replayBtn, 8)
 
         fun isTrend() = strategy.selectedItemPosition == 1
         fun isDca() = strategy.selectedItemPosition == 2
@@ -394,6 +402,17 @@ class MainActivity : Activity() {
             }
         }
 
+        replayBtn.setOnClickListener {
+            replayBtn.isEnabled = false; replayBtn.text = "Running…"
+            thread {
+                val result = try { Replay.compare(BinanceApi("", "")) } catch (e: Exception) { "Replay failed: ${e.message}" }
+                ui.post {
+                    replayBtn.isEnabled = true; replayBtn.text = "Replay: momentum vs dip-buy (real history)"
+                    AlertDialog.Builder(this).setTitle("Replay result").setMessage(result).setPositiveButton("OK", null).show()
+                }
+            }
+        }
+
         toggle.setOnClickListener {
             if (BotState.running) {
                 startService(Intent(this, BotService::class.java).setAction("STOP"))
@@ -414,6 +433,7 @@ class MainActivity : Activity() {
                 e.putString("agentStartS", aStart.text.toString()).putInt("agentMaxPos", aMaxPos.text.toString().toInt())
                     .putString("agentVolS", aVol.text.toString()).putString("agentDdS", aDd.text.toString())
                     .putBoolean("agentLive", aLive.isChecked)
+                    .putString("entryStyle", if (styleSpin.selectedItemPosition == 1) "dip" else "momentum")
             } else {
                 e.putString("symbol", symbolNow())
                     .putString("interval", interval.text.toString().trim())
